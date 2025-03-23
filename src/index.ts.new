@@ -1,0 +1,192 @@
+// Cloudflare Worker Authentication API
+
+// Import required dependencies for Workers
+// Note: Workers have a different environment from Node.js
+import { Router } from 'itty-router';
+import { verify, sign } from '@tsndr/cloudflare-worker-jwt';
+import { compare, hash } from 'bcryptjs';
+
+// Create a new router
+const router = Router();
+
+// In-memory user database (note: this will reset when the worker is redeployed)
+// For production, use Cloudflare KV, D1, or another persistent storage
+let users = [];
+
+// Environment variables can be accessed via the env parameter in the handler
+// You'll need to set these in the Cloudflare Workers dashboard
+
+// Helper function to handle JWT authentication
+const authenticateToken = async (request, env) => {
+  const authHeader = request.headers.get('Authorization');
+  const token = authHeader && authHeader.split(' ')[1];
+  
+  if (!token) {
+    return new Response(JSON.stringify({ message: 'No token provided' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  
+  try {
+    const isValid = await verify(token, env.JWT_SECRET || 'your-secret-key');
+    if (!isValid) {
+      throw new Error('Invalid token');
+    }
+    
+    // Decode the token payload
+    const tokenParts = token.split('.');
+    const payload = JSON.parse(atob(tokenParts[1]));
+    
+    return payload;
+  } catch (error) {
+    return new Response(JSON.stringify({ message: 'Invalid token' }), {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+};
+
+// Register route
+router.post('/api/register', async (request, env) => {
+  try {
+    const { username, password } = await request.json();
+    
+    // Check if user already exists
+    if (users.find(user => user.username === username)) {
+      return new Response(JSON.stringify({ message: 'User already exists' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Hash password
+    const hashedPassword = await hash(password, 10);
+    
+    // Create new user
+    const user = {
+      id: users.length + 1,
+      username,
+      password: hashedPassword
+    };
+    
+    users.push(user);
+    
+    // Generate JWT
+    const token = await sign(
+      { userId: user.id }, 
+      env.JWT_SECRET || 'your-secret-key', 
+      { expiresIn: '1h' }
+    );
+    
+    return new Response(JSON.stringify({
+      message: 'User created successfully',
+      token,
+      redirectUrl: `http://your-frontend-app.com/login?token=${token}`
+    }), {
+      status: 201,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ 
+      message: 'Error creating user', 
+      error: error.message 
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Login route
+router.post('/api/login', async (request, env) => {
+  try {
+    const { username, password } = await request.json();
+    
+    // Find user
+    const user = users.find(u => u.username === username);
+    if (!user) {
+      return new Response(JSON.stringify({ message: 'Invalid credentials' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Verify password
+    const isValidPassword = await compare(password, user.password);
+    if (!isValidPassword) {
+      return new Response(JSON.stringify({ message: 'Invalid credentials' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    
+    // Generate JWT
+    const token = await sign(
+      { userId: user.id }, 
+      env.JWT_SECRET || 'your-secret-key', 
+      { expiresIn: '1h' }
+    );
+    
+    return new Response(JSON.stringify({
+      message: 'Login successful',
+      token,
+      redirectUrl: `http://your-frontend-app.com/dashboard?token=${token}`
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ 
+      message: 'Error logging in', 
+      error: error.message 
+    }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+});
+
+// Protected route example
+router.get('/api/protected', async (request, env) => {
+  const user = await authenticateToken(request, env);
+  
+  if (user instanceof Response) {
+    return user; // Return the error response if authentication failed
+  }
+  
+  return new Response(JSON.stringify({ 
+    message: 'Protected data', 
+    userId: user.userId 
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+});
+
+// 404 handler
+router.all('*', () => new Response('Not Found', { status: 404 }));
+
+// Main worker event handler
+export default {
+  async fetch(request, env, ctx) {
+    // Handle CORS
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+          'Access-Control-Max-Age': '86400'
+        }
+      });
+    }
+    
+    // Add CORS headers to all responses
+    const response = await router.handle(request, env);
+    const newResponse = new Response(response.body, response);
+    
+    newResponse.headers.set('Access-Control-Allow-Origin', '*');
+    return newResponse;
+  }
+};
