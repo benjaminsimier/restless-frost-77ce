@@ -30,6 +30,18 @@ export default {
       url.pathname = "/authorize";
       return Response.redirect(url.toString());
     } else if (url.pathname === "/callback") {
+      const redirectUri = url.searchParams.get('redirect_uri');
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      
+      if (redirectUri) {
+        const redirectUrl = new URL(redirectUri);
+        redirectUrl.searchParams.set('code', code);
+        if (state) redirectUrl.searchParams.set('state', state);
+        return Response.redirect(redirectUrl.toString(), 302);
+      }
+      
+      // Fall back to JSON response if no redirect_uri
       return Response.json({
         message: "OAuth flow complete!",
         params: Object.fromEntries(url.searchParams.entries()),
